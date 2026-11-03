@@ -219,6 +219,24 @@ def display_name(name, basename=False):
         return name
 
 
+def relocation_name(dynamic, relocation_fn, relocation_index):
+    """
+    Return the name for a relocation entry in the dynamic section.
+
+    In the case of most relocations, this is the name of the symbol at the
+    entry address. For IRELATIVE relocations, this is a generic name with
+    an address that is unique to the relocation entry.
+    """
+    relocation_type = relocation_fn(relocation_index, "r_type")
+    if relocation_type in IRELATIVE_SLOTS[pwndbg.aglib.arch.name]:
+        slot_address = dynamic.load_bias + relocation_fn(relocation_index, "r_offset")
+        return f"IREL_{slot_address & 0xFFFFFF:06x}"
+
+    symbol_index = relocation_fn(relocation_index, "r_sym")
+    symbol_name = dynamic.symtab_read(symbol_index, "st_name")
+    return display_name(dynamic.string(symbol_name))
+
+
 # The allocator we use for our trap addresses.
 TRAP_ALLOCATOR = TrapAllocator()
 
@@ -256,12 +274,10 @@ class Patcher(pwndbg.gdblib.bpoint.Breakpoint):
             objfile = pwndbg.aglib.proc.exe()
         self.tracker.obj_display_name = display_name(objfile, basename=True)
 
-        self.tracker.sym_display_name = display_name(
-            self.tracker.dynamic_section.string(
-                self.tracker.dynamic_section.symtab_read(
-                    self.tracker.relocation_fn(self.tracker.relocation_index, "r_sym"), "st_name"
-                )
-            )
+        self.tracker.sym_display_name = relocation_name(
+            self.tracker.dynamic_section,
+            self.tracker.relocation_fn,
+            self.tracker.relocation_index,
         )
 
     def should_stop(self) -> bool:
@@ -357,7 +373,7 @@ def _update_watchpoints() -> None:
         tracker.delete()
     INSTALLED_WATCHPOINTS.clear()
 
-    # Install new watchpoints to cover all of the jump slots in all GOTs
+    # Install new watchpoints to cover all of the tracked slots in all GOTs.
     for obj in pwndbg.aglib.dynamic.link_map():
         name = obj.name()
         if name == b"":
@@ -370,9 +386,11 @@ def _update_watchpoints() -> None:
             continue
 
         jump_slots = JUMP_SLOTS[pwndbg.aglib.arch.name]
+        irel_slots = IRELATIVE_SLOTS[pwndbg.aglib.arch.name]
+        all_slots = jump_slots | irel_slots
         if dynamic.has_rel:
             for i in range(dynamic.rel_entry_count()):
-                if dynamic.rel_read(i, "r_type") not in jump_slots:
+                if dynamic.rel_read(i, "r_type") not in all_slots:
                     continue
                 target = dynamic.load_bias + dynamic.rel_read(i, "r_offset")
 
@@ -387,13 +405,13 @@ def _update_watchpoints() -> None:
                 INSTALLED_WATCHPOINTS[target] = (tracker, patcher)
         if dynamic.has_rela:
             for i in range(dynamic.rela_entry_count()):
-                if dynamic.rela_read(i, "r_type") not in jump_slots:
+                relocation_type = dynamic.rela_read(i, "r_type")
+                if relocation_type not in all_slots:
                     continue
-                target = (
-                    dynamic.load_bias
-                    + dynamic.rela_read(i, "r_offset")
-                    + dynamic.rela_read(i, "r_addend")
-                )
+                target = dynamic.load_bias + dynamic.rela_read(i, "r_offset")
+                # IRELATIVE slots do not need the addend
+                if relocation_type not in irel_slots:
+                    target += dynamic.rela_read(i, "r_addend")
 
                 tracker = Tracker()
                 tracker.dynamic_section = dynamic
@@ -406,10 +424,15 @@ def _update_watchpoints() -> None:
                 INSTALLED_WATCHPOINTS[target] = (tracker, patcher)
         if dynamic.has_jmprel:
             for i in range(dynamic.jmprel_entry_count()):
-                if dynamic.jmprel_read(i, "r_type") not in jump_slots:
+                relocation_type = dynamic.jmprel_read(i, "r_type")
+                if relocation_type not in all_slots:
                     continue
                 target = dynamic.load_bias + dynamic.jmprel_read(i, "r_offset")
-                if dynamic.jmprel_elem.has_field("r_addend"):
+                # IRELATIVE slots do not need the addend
+                if (
+                    relocation_type not in irel_slots
+                    and dynamic.jmprel_elem.has_field("r_addend")
+                ):
                     target += dynamic.jmprel_read(i, "r_addend")
 
                 tracker = Tracker()

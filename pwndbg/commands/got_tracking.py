@@ -171,10 +171,11 @@ def got_report(soname=".*", writable=False, fnname=".*") -> None:
             if writable and not pwndbg.aglib.vmmap.find(patcher.entry).write:
                 continue
 
-            dynamic = tracker.dynamic_section
-            sym_index = tracker.relocation_fn(tracker.relocation_index, "r_sym")
-            sym_name = dynamic.symtab_read(sym_index, "st_name")
-            sym_name = pwndbg.gdblib.got.display_name(dynamic.string(sym_name))
+            sym_name = pwndbg.gdblib.got.relocation_name(
+                tracker.dynamic_section,
+                tracker.relocation_fn,
+                tracker.relocation_index,
+            )
 
             # Filter out symbols we're not interested in.
             if fnname.match(sym_name) is None:
@@ -214,13 +215,12 @@ def got_tracking_status(address) -> None:
 
     tracker, _ = result
 
-    dynamic = tracker.dynamic_section
+    sym_name = pwndbg.gdblib.got.relocation_name(
+        tracker.dynamic_section,
+        tracker.relocation_fn,
+        tracker.relocation_index,
+    )
     sym_index = tracker.relocation_fn(tracker.relocation_index, "r_sym")
-    raw_sym_name = dynamic.symtab_read(sym_index, "st_name")
-    sym_name = pwndbg.gdblib.got.display_name(dynamic.string(raw_sym_name))
-
-    if sym_name == "":
-        sym_name = "<Empty>"
 
     objname = tracker.link_map_entry.name()
     if objname == b"":
